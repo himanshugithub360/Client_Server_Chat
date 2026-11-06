@@ -1,0 +1,7 @@
+# Build output
+*.exe
+*.o
+*.obj
+
+# Editor settings
+.vscode/
