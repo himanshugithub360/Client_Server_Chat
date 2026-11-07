@@ -43,8 +43,9 @@ static void broadcast(Room& room, const string& msg, SOCKET except) {
 
 // Block until `s` has data (or the peer closed), polling so a shutdown is noticed within
 // ~100 ms. shutdown()/closesocket() from another thread can't be relied on to wake a
-// blocked recv() on Windows. Returns false on shutdown or socket error.
-static bool waitReadable(Room& room, SOCKET s) {
+// blocked recv() on Windows. Returns false on shutdown, socket error, or when nothing
+// (not even a heartbeat reply) has arrived since `lastSeen` for HEARTBEAT_TIMEOUT_MS.
+static bool waitReadable(Room& room, SOCKET s, DWORD lastSeen) {
     while (!InterlockedCompareExchange(&room.stopping, 0, 0)) {
         fd_set readable;
         FD_ZERO(&readable);
@@ -53,6 +54,7 @@ static bool waitReadable(Room& room, SOCKET s) {
         int ready = select(0, &readable, nullptr, nullptr, &tv);
         if (ready > 0) return true;
         if (ready == SOCKET_ERROR) return false;
+        if (GetTickCount() - lastSeen >= HEARTBEAT_TIMEOUT_MS) return false;
     }
     return false;
 }
@@ -123,10 +125,12 @@ static unsigned __stdcall clientThread(void* param) {
     Room& room = *arg.room;
     string name;
     string msg;
+    DWORD lastSeen = GetTickCount();  // last time this client sent us anything, PONGs included
 
     // Handshake: we send HELLO, the client answers with its desired username.
-    if (sendMessage(arg.sock, SERVER_HELLO) && waitReadable(room, arg.sock) &&
+    if (sendMessage(arg.sock, SERVER_HELLO) && waitReadable(room, arg.sock, lastSeen) &&
         recvMessage(arg.sock, msg)) {
+        lastSeen = GetTickCount();
         // Register the name and the socket together so two clients can't claim one name.
         EnterCriticalSection(&room.lock);
         name = uniqueName(room, cleanName(msg, arg.id));
@@ -138,7 +142,9 @@ static unsigned __stdcall clientThread(void* param) {
         logLine(room, name + " joined");
         broadcast(room, name + " joined the chat", arg.sock);
 
-        while (waitReadable(room, arg.sock) && recvMessage(arg.sock, msg) && msg != "exit") {
+        while (waitReadable(room, arg.sock, lastSeen) && recvMessage(arg.sock, msg) && msg != "exit") {
+            lastSeen = GetTickCount();
+            if (msg == PONG_MSG) continue;  // heartbeat reply, nothing to relay
             if (!msg.empty() && msg[0] == '/') {  // chat command, answered to the sender only
                 if (msg == "/quit") break;
                 sendTo(room, arg.sock, commandReply(room, msg));
@@ -160,8 +166,10 @@ static unsigned __stdcall clientThread(void* param) {
         LeaveCriticalSection(&room.lock);
 
         if (!InterlockedCompareExchange(&room.stopping, 0, 0)) {
-            logLine(room, name + " left");
-            broadcast(room, name + " left the chat", INVALID_SOCKET);
+            bool timedOut = GetTickCount() - lastSeen >= HEARTBEAT_TIMEOUT_MS;
+            string how = timedOut ? " timed out" : " left";
+            logLine(room, name + how);
+            broadcast(room, name + how + (timedOut ? "" : " the chat"), INVALID_SOCKET);
         }
     }
 
@@ -175,12 +183,17 @@ static unsigned __stdcall acceptThread(void* param) {
     Room& room = *static_cast<Room*>(param);
     // closesocket() on a listening socket does not reliably wake a blocked accept()
     // on Windows, so poll with a short select() timeout and re-check `stopping`.
+    DWORD lastPing = GetTickCount();
     while (!InterlockedCompareExchange(&room.stopping, 0, 0)) {
         fd_set readable;
         FD_ZERO(&readable);
         FD_SET(room.listener, &readable);
         timeval tv = {0, 100 * 1000};  // 100 ms
         int ready = select(0, &readable, nullptr, nullptr, &tv);
+        if (GetTickCount() - lastPing >= HEARTBEAT_INTERVAL_MS) {  // doubles as the heartbeat timer
+            broadcast(room, PING_MSG, INVALID_SOCKET);
+            lastPing = GetTickCount();
+        }
         if (ready == 0) continue;
         if (ready == SOCKET_ERROR) {
             if (InterlockedCompareExchange(&room.stopping, 0, 0)) return 0;

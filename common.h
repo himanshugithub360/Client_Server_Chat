@@ -96,7 +96,34 @@ struct ChatSession {
     volatile LONG localQuit;     // set by the main thread when we leave
     bool vtEnabled;              // console understands ANSI escape codes
     bool prefixMessages;         // show "peerName: msg"; false when the peer already labels messages
+    CRITICAL_SECTION sendLock;   // the main thread and the receiver (PONG replies) both send
+    volatile LONG endReason;     // CHAT_* result, written once by whichever thread notices first
 };
+
+// How runChat ended.
+const int CHAT_USER_QUIT = 0;      // we typed "exit" (or input ended)
+const int CHAT_SERVER_ENDED = 1;   // the peer sent "exit": a deliberate end, do not reconnect
+const int CHAT_CONNECTION_LOST = 2; // socket error or heartbeat timeout: a reconnect is worthwhile
+
+// Heartbeat: the server sends PING every HEARTBEAT_INTERVAL_MS and clients answer PONG.
+// Either side that hears nothing for HEARTBEAT_TIMEOUT_MS treats the connection as dead.
+// The leading 0x01 byte keeps these from ever matching something a user could type.
+const char* const PING_MSG = "\x01PING";
+const char* const PONG_MSG = "\x01PONG";
+const DWORD HEARTBEAT_INTERVAL_MS = 5000;
+const DWORD HEARTBEAT_TIMEOUT_MS = 15000;
+
+inline bool lockedSend(ChatSession& cs, const std::string& msg) {
+    EnterCriticalSection(&cs.sendLock);
+    bool ok = sendMessage(cs.sock, msg);
+    LeaveCriticalSection(&cs.sendLock);
+    return ok;
+}
+
+// Record why the chat ended; only the first caller wins.
+inline void setEndReason(ChatSession& cs, int reason) {
+    InterlockedCompareExchange(&cs.endReason, reason, -1);
+}
 
 // Print a full line, first clearing whatever is on the current (prompt) line,
 // then optionally redraw the prompt so the user knows they can keep typing.
@@ -133,15 +160,40 @@ inline bool wakeConsoleInput() {
 inline unsigned __stdcall receiverThread(void* arg) {
     ChatSession& cs = *static_cast<ChatSession*>(arg);
     std::string msg;
+    DWORD lastHeard = GetTickCount();
     while (true) {
-        bool ok = recvMessage(cs.sock, msg);
+        // Poll instead of blocking in recv() so a silent (dead) peer is noticed and
+        // so we can stop promptly when the user leaves.
+        fd_set readable;
+        FD_ZERO(&readable);
+        FD_SET(cs.sock, &readable);
+        timeval tv = {0, 200 * 1000};
+        int ready = select(0, &readable, nullptr, nullptr, &tv);
         if (InterlockedCompareExchange(&cs.localQuit, 0, 0)) return 0;  // we left; stay quiet
 
+        bool ok = true;
+        bool timedOut = false;
+        if (ready == 0) {
+            if (GetTickCount() - lastHeard < HEARTBEAT_TIMEOUT_MS) continue;
+            ok = false;
+            timedOut = true;
+        } else if (ready == SOCKET_ERROR) {
+            ok = false;
+        } else {
+            ok = recvMessage(cs.sock, msg);
+            if (InterlockedCompareExchange(&cs.localQuit, 0, 0)) return 0;
+            lastHeard = GetTickCount();
+            if (ok && msg == PING_MSG) { lockedSend(cs, PONG_MSG); continue; }
+            if (ok && msg == PONG_MSG) continue;
+        }
+
         if (!ok || msg == "exit") {
+            setEndReason(cs, ok ? CHAT_SERVER_ENDED : CHAT_CONNECTION_LOST);
             InterlockedExchange(&cs.peerDone, 1);
-            std::string why = ok ? " ended the chat." : " disconnected.";
+            std::string why = ok ? " ended the chat."
+                                 : (timedOut ? " stopped responding." : " disconnected.");
             bool woke = wakeConsoleInput();  // unblock the main thread's getline()
-            printLine(cs, cs.peerName + why + (woke ? "" : " Press Enter to close."), false);
+            printLine(cs, cs.peerName + why + (woke ? "" : " Press Enter to continue."), false);
             return 0;
         }
         printLine(cs, cs.prefixMessages ? cs.peerName + ": " + msg : msg, true);
@@ -149,15 +201,17 @@ inline unsigned __stdcall receiverThread(void* arg) {
 }
 
 // Run an interactive chat over a connected socket until either side types
-// "exit" or the connection drops. Does not close the socket.
-inline void runChat(SOCKET sock, const std::string& peerName, bool prefixMessages = true) {
+// "exit" or the connection drops. Does not close the socket. Returns a CHAT_* code.
+inline int runChat(SOCKET sock, const std::string& peerName, bool prefixMessages = true) {
     ChatSession cs;
     cs.sock = sock;
     cs.peerName = peerName;
     cs.prefixMessages = prefixMessages;
     cs.peerDone = 0;
     cs.localQuit = 0;
+    cs.endReason = -1;
     InitializeCriticalSection(&cs.outLock);
+    InitializeCriticalSection(&cs.sendLock);
 
     HANDLE out = GetStdHandle(STD_OUTPUT_HANDLE);
     DWORD mode = 0;
@@ -168,7 +222,8 @@ inline void runChat(SOCKET sock, const std::string& peerName, bool prefixMessage
     if (thread == nullptr) {
         std::cerr << "Could not start receiver thread.\n";
         DeleteCriticalSection(&cs.outLock);
-        return;
+        DeleteCriticalSection(&cs.sendLock);
+        return CHAT_USER_QUIT;
     }
 
     std::string msg;
@@ -184,17 +239,26 @@ inline void runChat(SOCKET sock, const std::string& peerName, bool prefixMessage
         }
 
         if (msg == "exit") InterlockedExchange(&cs.localQuit, 1);
-        if (!sendMessage(sock, msg)) {
-            if (!InterlockedCompareExchange(&cs.peerDone, 0, 0)) printSocketError("send");
+        if (!lockedSend(cs, msg)) {
+            if (!InterlockedCompareExchange(&cs.peerDone, 0, 0)) {
+                setEndReason(cs, CHAT_CONNECTION_LOST);
+                printLine(cs, "Send failed: connection lost.", false);
+            }
             break;
         }
-        if (msg == "exit") break;
+        if (msg == "exit") {
+            setEndReason(cs, CHAT_USER_QUIT);
+            break;
+        }
     }
 
-    // Stop the receiver: shutdown() makes its blocked recv() return.
+    // Stop the receiver; it polls, so it notices localQuit within ~200 ms.
     InterlockedExchange(&cs.localQuit, 1);
     shutdown(sock, SD_BOTH);
     WaitForSingleObject(thread, INFINITE);
     CloseHandle(thread);
     DeleteCriticalSection(&cs.outLock);
+    DeleteCriticalSection(&cs.sendLock);
+    int reason = static_cast<int>(cs.endReason);
+    return reason < 0 ? CHAT_USER_QUIT : reason;
 }
