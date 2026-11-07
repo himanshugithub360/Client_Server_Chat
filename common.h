@@ -110,6 +110,9 @@ const int CHAT_CONNECTION_LOST = 2; // socket error or heartbeat timeout: a reco
 // The leading 0x01 byte keeps these from ever matching something a user could type.
 const char* const PING_MSG = "\x01PING";
 const char* const PONG_MSG = "\x01PONG";
+// Control frame listing who is online: "\x01USERS" followed by "\t<name>" for each user.
+// Console clients ignore it; the web client shows it as a live user list.
+const char* const USERS_MSG = "\x01USERS";
 const DWORD HEARTBEAT_INTERVAL_MS = 5000;
 const DWORD HEARTBEAT_TIMEOUT_MS = 15000;
 
@@ -185,6 +188,7 @@ inline unsigned __stdcall receiverThread(void* arg) {
             lastHeard = GetTickCount();
             if (ok && msg == PING_MSG) { lockedSend(cs, PONG_MSG); continue; }
             if (ok && msg == PONG_MSG) continue;
+            if (ok && !msg.empty() && msg[0] == '\x01') continue;  // other control frames (USERS...)
         }
 
         if (!ok || msg == "exit") {

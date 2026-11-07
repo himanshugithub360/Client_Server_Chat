@@ -41,6 +41,15 @@ static void broadcast(Room& room, const string& msg, SOCKET except) {
     LeaveCriticalSection(&room.lock);
 }
 
+// Tell everyone who is online (control frame, see USERS_MSG).
+static void broadcastUsers(Room& room) {
+    EnterCriticalSection(&room.lock);
+    string m = USERS_MSG;
+    for (const string& n : room.names) m += "\t" + n;
+    for (SOCKET c : room.clients) sendMessage(c, m);
+    LeaveCriticalSection(&room.lock);
+}
+
 // Block until `s` has data (or the peer closed), polling so a shutdown is noticed within
 // ~100 ms. shutdown()/closesocket() from another thread can't be relied on to wake a
 // blocked recv() on Windows. Returns false on shutdown, socket error, or when nothing
@@ -132,15 +141,18 @@ static unsigned __stdcall clientThread(void* param) {
         recvMessage(arg.sock, msg)) {
         lastSeen = GetTickCount();
         // Register the name and the socket together so two clients can't claim one name.
+        // The welcome goes out under the lock and before the socket is listed, so no
+        // broadcast (ping, chat line) can reach this client ahead of it or interleave with it.
         EnterCriticalSection(&room.lock);
         name = uniqueName(room, cleanName(msg, arg.id));
+        sendMessage(arg.sock, "Welcome, " + name + "! Type /help for commands, 'exit' to leave.");
         room.clients.push_back(arg.sock);
         room.names.push_back(name);
         LeaveCriticalSection(&room.lock);
 
-        sendMessage(arg.sock, "Welcome, " + name + "! Type /help for commands, 'exit' to leave.");
         logLine(room, name + " joined");
         broadcast(room, name + " joined the chat", arg.sock);
+        broadcastUsers(room);
 
         while (waitReadable(room, arg.sock, lastSeen) && recvMessage(arg.sock, msg) && msg != "exit") {
             lastSeen = GetTickCount();
@@ -170,6 +182,7 @@ static unsigned __stdcall clientThread(void* param) {
             string how = timedOut ? " timed out" : " left";
             logLine(room, name + how);
             broadcast(room, name + how + (timedOut ? "" : " the chat"), INVALID_SOCKET);
+            broadcastUsers(room);
         }
     }
 
