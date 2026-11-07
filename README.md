@@ -1,235 +1,232 @@
-# 💬 Client–Server Chat (C++ · Winsock · TCP)
+<div align="center">
 
-A minimal two-way chat between a **server** and a **client** over **TCP sockets**, written in C++ with the Windows Sockets API (Winsock 2). The two programs connect on port `8080` and take turns sending text messages from the console until the client types `exit`.
+# 💬 Client–Server Chat
 
-The project is intentionally small (about 100 lines). It is a hands-on walk through the full TCP socket lifecycle: **initialize → socket → bind → listen → accept / connect → send ↔ recv → close**.
+**A multi-user chat room in C++ and Winsock, with a console client and a browser client.**
 
----
+![C++](https://img.shields.io/badge/C%2B%2B-11-00599C?logo=cplusplus&logoColor=white)
+![Platform](https://img.shields.io/badge/platform-Windows-0078D6?logo=windows&logoColor=white)
+![Python](https://img.shields.io/badge/bridge-Python%203.8%2B-3776AB?logo=python&logoColor=white)
+![Dependencies](https://img.shields.io/badge/dependencies-none-brightgreen)
 
-## Table of contents
+</div>
 
-- [Features](#features)
-- [How it works](#how-it-works)
-- [Project structure](#project-structure)
-- [Requirements](#requirements)
-- [Build](#build)
-- [Run](#run)
-- [Example session](#example-session)
-- [Protocol details](#protocol-details)
-- [Limitations](#limitations)
-- [Roadmap](#roadmap)
-- [What this project demonstrates](#what-this-project-demonstrates)
-
----
-
-## Features
-
-- **TCP client–server communication** using Winsock 2 (`ws2_32`)
-- **Server listens on all interfaces** (`INADDR_ANY`) on port **8080**
-- **Turn-based console chat**: client and server alternate messages
-- **Graceful shutdown**: the client sends `exit`, both sides close their sockets and call `WSACleanup()`
-- **No external dependencies**: only the C++ standard library and the Windows SDK
-
----
-
-## How it works
-
-```mermaid
-sequenceDiagram
-    participant S as Server (server.exe)
-    participant C as Client (client.exe)
-
-    S->>S: WSAStartup → socket → bind(:8080) → listen
-    Note over S: "Server waiting for client..."
-    C->>C: WSAStartup → socket
-    C->>S: connect(127.0.0.1:8080)
-    S->>S: accept → "Client connected!"
-
-    loop until client sends "exit"
-        C->>S: send(message)
-        S->>S: recv → print "Client: …"
-        S->>C: send(reply)
-        C->>C: recv → print "Server: …"
-    end
-
-    C->>S: send("exit")
-    S->>S: closesocket ×2, WSACleanup
-    C->>C: closesocket, WSACleanup
-```
-
-### Server (`server.cpp`)
-
-| Step | Call | Purpose |
-| --- | --- | --- |
-| 1 | `WSAStartup(MAKEWORD(2,2), …)` | Load Winsock version 2.2 |
-| 2 | `socket(AF_INET, SOCK_STREAM, 0)` | Create an IPv4 TCP socket |
-| 3 | `bind(…, INADDR_ANY, port 8080)` | Attach the socket to port 8080 on every network interface |
-| 4 | `listen(…, 1)` | Start listening, with a backlog of one pending connection |
-| 5 | `accept(…)` | Block until a client connects; returns a new socket for that client |
-| 6 | `recv` → print → read reply → `send` | Chat loop, one message each way per turn |
-| 7 | `closesocket`, `WSACleanup` | Release the sockets and Winsock |
-
-### Client (`client.cpp`)
-
-| Step | Call | Purpose |
-| --- | --- | --- |
-| 1 | `WSAStartup(MAKEWORD(2,2), …)` | Load Winsock version 2.2 |
-| 2 | `socket(AF_INET, SOCK_STREAM, 0)` | Create an IPv4 TCP socket |
-| 3 | `connect(127.0.0.1:8080)` | Connect to the server on the same machine |
-| 4 | read input → `send` → `recv` → print | Chat loop; sending `exit` ends the session |
-| 5 | `closesocket`, `WSACleanup` | Release the socket and Winsock |
-
----
-
-## Project structure
+A small but complete TCP chat system. One server hosts a room, and any number of people can join it
+from the **console** (`client.exe`) or from a **web browser** (through a tiny bridge). Everyone ends up in the
+same conversation.
 
 ```
-Client_Server_Chat/
-├── server.cpp    # TCP server: bind, listen, accept, chat loop
-├── client.cpp    # TCP client: connect, chat loop, "exit" to quit
-└── README.md
+ ┌────────────┐   TCP    ┌─────────────┐   TCP    ┌──────────────┐  WebSocket  ┌──────────┐
+ │ client.exe │ ───────► │ server.exe  │ ◄─────── │  bridge.py   │ ◄────────── │ Browser  │
+ └────────────┘          │ (chat room) │          └──────────────┘             └──────────┘
+                         └─────────────┘
 ```
 
 ---
 
-## Requirements
+## Contents
 
-- **Windows** (the code uses Winsock: `winsock2.h`, `ws2tcpip.h`)
-- A C++ compiler, either:
-  - **MSVC** (Visual Studio / Build Tools), or
-  - **MinGW-w64 g++** (for example through MSYS2)
+[Features](#-features) · [Quick start](#-quick-start) · [Web client](#-web-client) ·
+[Using the chat](#-using-the-chat) · [How it works](#-how-it-works) · [Project layout](#-project-layout) ·
+[Security notes](#-security-notes) · [Roadmap](#-roadmap)
 
 ---
 
-## Build
+## ✨ Features
 
-### MinGW-w64 (g++)
+| | |
+|---|---|
+| 👥 **Multi-user room** | Many clients at once, one thread each. Messages are relayed to everyone else. |
+| 🏷️ **Usernames** | Type any name you like. Duplicates get a suffix (`Maria_2`). `Server` is reserved. |
+| 🕒 **Timestamps** | Chat lines are stamped, for example `[21:45] Maria: hello`. |
+| ⌨️ **Commands** | `/users`, `/help`, `/quit`, answered privately to you. |
+| ❤️ **Heartbeat** | The server pings every 5 s. Anything silent for 15 s is treated as dead and dropped. |
+| 🔁 **Auto-reconnect** | A client that loses its connection retries with backoff and rejoins under the same name. |
+| 🌐 **Browser client** | Responsive web UI with a live online list, light and dark themes, and phone support. |
+| 🔒 **Safe port binding** | The server claims its port exclusively and clients verify a handshake, so another program on the same port can't silently hijack the chat. |
+| 📦 **Zero dependencies** | C++ standard library plus Winsock, and a standard-library-only Python bridge. |
 
-MinGW ignores `#pragma comment(lib, …)`, so link Winsock explicitly with `-lws2_32`:
+---
 
+## 🚀 Quick start
+
+### Requirements
+
+- Windows 10 or 11
+- A C++11 compiler: [MinGW-w64](https://www.mingw-w64.org/) `g++`, or MSVC
+- Python 3.8+ (only for the web client)
+
+### Build
+
+**MinGW / g++**
 ```bash
-g++ server.cpp -o server.exe -lws2_32
-g++ client.cpp -o client.exe -lws2_32
+g++ -std=c++11 -o server.exe server.cpp -lws2_32
+g++ -std=c++11 -o client.exe client.cpp -lws2_32
 ```
 
-### MSVC (Developer Command Prompt)
-
-The `#pragma comment(lib, "ws2_32.lib")` line links Winsock automatically:
-
+**MSVC** (Developer Command Prompt)
 ```bat
-cl /EHsc server.cpp
-cl /EHsc client.cpp
+cl /EHsc /std:c++14 server.cpp
+cl /EHsc /std:c++14 client.cpp
 ```
+
+### Run
+
+**1. Start the server** (default port `8080`, or pass your own):
+```bash
+./server.exe 9090
+```
+
+**2. Join from one or more consoles:**
+```bash
+./client.exe 127.0.0.1 9090
+```
+The client asks for your name. You can also pass it directly: `./client.exe 127.0.0.1 9090 Maria`.
+
+| Program | Usage |
+|---|---|
+| `server.exe` | `server.exe [port]`  (default `8080`) |
+| `client.exe` | `client.exe [host] [port] [name]`  (defaults: `127.0.0.1`, `8080`, asks for a name) |
+
+> **Port already in use?** Error `10048` means another program is on that port. Pick a different one, such as `9090`.
 
 ---
 
-## Run
+## 🌐 Web client
 
-Use **two terminals** and start the server first.
-
-**Terminal 1: server**
+No install is needed for the people who join: they just open a web page. The bridge is plain Python with no `pip install`.
 
 ```bash
-./server.exe
+python web/bridge.py --chat-port 9090
 ```
 
-```
-Server waiting for client...
-```
+Open **http://127.0.0.1:8000**, choose a name, and chat.
 
-**Terminal 2: client**
-
+**Let others on your network join:**
 ```bash
-./client.exe
+python web/bridge.py --chat-port 9090 --bind 0.0.0.0
 ```
+The bridge prints a link such as `http://192.168.1.20:8000` to share. You may need to allow Python through
+Windows Firewall.
 
-```
-Connected to server!
-Client:
-```
+| Bridge option | Default | Meaning |
+|---|---|---|
+| `--chat-host` | `127.0.0.1` | where `server.exe` runs |
+| `--chat-port` | `8080` | the port `server.exe` listens on |
+| `--http-port` | `8000` | the port serving the web page |
+| `--bind` | `127.0.0.1` | use `0.0.0.0` to accept other devices |
 
-Type a message in the client and press Enter. Then reply from the server terminal. Type `exit` in the **client** to end the chat.
-
-> If Windows Defender Firewall asks whether to allow `server.exe` on the network, allow it on **Private networks**.
+More detail is in [web/README.md](web/README.md).
 
 ---
 
-## Example session
+## 🗨️ Using the chat
 
-**Server terminal**
+| Type | Result |
+|---|---|
+| any text | sent to everyone in the room |
+| `/users` | who is online (only you see the reply) |
+| `/help` | list of commands |
+| `/quit` or `exit` | leave the chat |
+
+The **server console** is part of the room too: whatever you type there is broadcast as `Server: ...`, and
+typing `exit` shuts the room down for everyone.
+
+Closing the server doesn't strand people. Clients retry automatically (2 s, 4 s, 6 s, up to 10 s between
+attempts, 10 tries) and rejoin when the server comes back. A deliberate `exit` from either side does not
+trigger a reconnect.
+
+---
+
+## 🔧 How it works
+
+### Threads
+
+- **Server:** the main thread reads the operator's console, an accept thread takes new connections and sends
+  heartbeat pings, and every client gets its own handler thread. All sends happen under one lock, so two
+  messages can never interleave on a socket.
+- **Console client:** the main thread reads the keyboard, and a receiver thread prints incoming messages.
+  Either side can talk at any time.
+- Blocking calls are replaced by short `select()` polls (100 to 200 ms), so shutdown and dead-peer
+  detection are reliable on Windows.
+
+### Wire protocol
+
+Every message is a **4-byte big-endian length** followed by that many bytes of UTF-8, so message boundaries
+survive TCP's byte-stream nature. The maximum size is 64 KB.
 
 ```
-Server waiting for client...
-Client connected!
-Client: hello server
-Server: hi! how are you?
-Client: all good, bye
-Server: bye!
-Client: exit
+ server → client   "CHAT/1 HELLO"                       handshake: you reached the chat server
+ client → server   "<desired name>"
+ server → client   "Welcome, <name>! Type /help ..."    the name may have been adjusted
+        ...
+ server → client   "[21:45] Maria: hello"               relayed chat line
+ server → client   "\x01PING"      client → "\x01PONG"   heartbeat
+ server → client   "\x01USERS\tMaria\tRaj"              live online list
+ either → other    "exit"                               leave / end of chat
 ```
 
-**Client terminal**
+Control frames start with the byte `0x01`, so a user can never type one by accident.
+
+### Web bridge
+
+`web/bridge.py` accepts a browser WebSocket, performs the same handshake as a console client, answers
+heartbeats on the browser's behalf, and converts frames to small JSON messages. The page itself is a single
+`index.html` file with no build step.
+
+---
+
+## 📁 Project layout
 
 ```
-Connected to server!
-Client: hello server
-Server: hi! how are you?
-Client: all good, bye
-Server: bye!
-Client: exit
+.
+├── common.h          shared helpers: framing, heartbeat, full-duplex chat loop
+├── server.cpp        multi-client chatroom server
+├── client.cpp        console client with auto-reconnect
+├── server.exe        prebuilt binaries
+├── client.exe
+└── web/
+    ├── bridge.py     HTTP + WebSocket bridge (Python, stdlib only)
+    ├── index.html    browser UI
+    └── README.md
 ```
 
 ---
 
-## Protocol details
+## 🔐 Security notes
 
-| Property | Value |
-| --- | --- |
-| Transport | TCP (`SOCK_STREAM`), IPv4 (`AF_INET`) |
-| Port | `8080` |
-| Server address | `INADDR_ANY` (all interfaces) |
-| Client target | `127.0.0.1` (same machine) |
-| Message format | Raw text, no length prefix or delimiter |
-| Buffer size | 1024 bytes |
-| Turn order | Client → Server → Client → … (half-duplex) |
-| End of session | Client sends the exact text `exit` |
-| Clients supported | One at a time |
+This is a learning project, so keep these limits in mind before exposing it:
+
+- **No encryption.** Traffic is plain text, so use it on networks you trust.
+- **No passwords.** Anyone who can reach the server or the web page can join under any free name.
+- The bridge only listens on `127.0.0.1` unless you pass `--bind 0.0.0.0`, and it rejects WebSocket
+  connections from other websites (origin check).
+- The browser UI renders messages as text, never as HTML.
 
 ---
 
-## Limitations
+## 🗺️ Roadmap
 
-This is a learning project, and the current version is deliberately simple:
+Done: ~~multiple clients~~ · ~~usernames and timestamps~~ · ~~length-prefixed framing~~ · ~~full-duplex chat~~ ·
+~~heartbeat and auto-reconnect~~ · ~~browser client~~
 
-- **Turn-based only.** Each side must wait for the other's reply before sending again, because `recv()` and `cin.getline()` both block.
-- **One client.** The server accepts a single connection and then stops listening for new ones.
-- **Localhost only.** The client connects to `127.0.0.1`, so chatting across two computers requires changing the address in `client.cpp` and recompiling.
-- **Only the client can end the chat.** Typing `exit` on the server side is sent as a normal message.
-- **No error handling.** Return values of `WSAStartup`, `socket`, `bind`, `connect`, `send` and `recv` are not checked. If the port is busy or the other side disconnects, the programs do not report it clearly.
-- **Message boundaries are not preserved.** TCP is a byte stream; one `recv()` is assumed to equal one message, which holds for short messages on a local connection but is not guaranteed.
-- **Buffer edge case.** `recv()` can fill all 1024 bytes, leaving no room for the terminating `'\0'` before the buffer is printed. Receiving into `sizeof(buffer) - 1` bytes fixes this.
-- **Windows only.** Winsock is not available on Linux or macOS.
+Ideas for next:
 
----
-
-## Roadmap
-
-- [ ] Check every socket call's return value and print `WSAGetLastError()` on failure
-- [ ] Handle disconnects (`recv()` returning `0` or `SOCKET_ERROR`)
-- [ ] Let either side type `exit`
-- [ ] Take server IP and port as command-line arguments
-- [ ] **Full-duplex chat**: a separate thread for receiving, so either side can send at any time
-- [ ] **Multiple clients** with one thread per client, or `select()`, and broadcast messages to everyone
-- [ ] Usernames and timestamps
-- [ ] Length-prefixed messages for correct framing
-- [ ] Cross-platform build (POSIX sockets on Linux/macOS) with CMake
+- [ ] Chat history: save messages to a log file and send the last N to new joiners
+- [ ] Coloured console output for users and system messages
+- [ ] File transfer on top of the existing framing
+- [ ] Login with a username and password file
+- [ ] TLS encryption (OpenSSL or Windows SChannel)
+- [ ] Linux and macOS support (POSIX sockets, CMake)
 
 ---
 
-## What this project demonstrates
+## 🛠️ Troubleshooting
 
-- The complete **TCP socket lifecycle** on the server and client sides
-- **Network byte order** with `htons()` and IPv4 addressing with `sockaddr_in`
-- The difference between the **listening socket** and the per-client socket returned by `accept()`
-- **Blocking I/O** and why it forces a turn-based conversation
-- Winsock setup and teardown with `WSAStartup()` and `WSACleanup()`
+| Problem | Fix |
+|---|---|
+| `bind ... failed with error 10048` | The port is taken. Run `./server.exe 9090` (any free port). |
+| `connect ... failed (is the server running?)` | Start `server.exe` first, and check the host and port. |
+| `the chat server did not answer` | Something else is using that port. Use a different one. |
+| Browser says it can't connect | Make sure `bridge.py` is running and `--chat-port` matches the server. |
+| Others can't open the web link | Start the bridge with `--bind 0.0.0.0` and allow Python through the firewall. |
